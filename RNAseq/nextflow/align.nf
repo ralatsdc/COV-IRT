@@ -1,17 +1,12 @@
 #!/usr/bin/env nextflow
 
-// TODO: Understand data storage on NASA cluster
-
-// TODO: Move into config file
-params.raw_reads_dir = "/home/ubuntu/COV-IRT/RNAseq/Fastq_Input_Files_for_Testing"
-
 raw_reads_files_ch = Channel.fromPath(params.raw_reads_dir + "/*.fastq.gz")
 
 params.raw_fastqc_dir = params.raw_reads_dir + "/raw_fastqc"
 
 process createRawReadsQC {
 
-  label "align"
+  label "COVIRT_fastq_to_alignment"
 
   publishDir params.raw_fastqc_dir, mode: "copy"
 
@@ -30,7 +25,7 @@ params.raw_multiqc_dir = params.raw_reads_dir + "/raw_multiqc"
 
 process compileRawReadsQC {
 
-  label "align"
+  label "COVIRT_fastq_to_alignment"
 
   publishDir params.raw_multiqc_dir, mode: "copy"
 
@@ -54,7 +49,7 @@ params.trimmed_reads_dir = params.raw_reads_dir + "/trimmed_reads"
 
 process trimRawReads {
 
-  label "align"
+  label "COVIRT_fastq_to_alignment"
   
   publishDir params.trimmed_reads_dir, mode: "copy"
 
@@ -89,7 +84,7 @@ params.trimmed_fastqc_dir = params.trimmed_reads_dir + "/trimmed_fastqc"
 
 process createTrimmedReadsQC {
 
-  label "align"
+  label "COVIRT_fastq_to_alignment"
 
   publishDir params.trimmed_fastqc_dir, mode: "copy"
 
@@ -108,7 +103,7 @@ params.trimmed_multiqc_dir = params.trimmed_reads_dir + "/trimmed_multiqc"
 
 process compileTrimmedReadsQC {
 
-  label "align"
+  label "COVIRT_fastq_to_alignment"
 
   publishDir params.trimmed_multiqc_dir, mode: "copy"
 
@@ -126,6 +121,8 @@ process compileTrimmedReadsQC {
 params.split_reads_dir = params.raw_reads_dir + "/split_reads"
 
 process splitTrimmedReads {
+
+  // TODO: Specify Docker image?
 
   publishDir params.split_reads_dir, mode: "copy"
 
@@ -154,20 +151,54 @@ process splitTrimmedReads {
   """
 }
 
-// TODO: Move into config file
-params.ensembl_data_dir = "/home/ubuntu/COV-IRT-Data"
-params.genome_dir = params.ensembl_data_dir + "/filtered"
+params.filtered_reads_dir = params.raw_reads_dir + "/filtered_reads"
+
+process filterSplitReads {
+
+  label "COVIRT_HTStream"
+
+  publishDir params.filtered_reads_dir, mode: "copy"
+
+  input:
+    env sample from split_reads_sample_ch
+    file split_reads_one_file from split_reads_one_files_ch
+    file split_reads_two_file from split_reads_two_files_ch
+
+  output:
+    env sample into filtered_reads_sample_ch
+    file "split_*_R1.fastq.gz" into filtered_reads_one_files_ch
+    file "split_*_R2.fastq.gz" into filtered_reads_two_files_ch
+    file "split_*.log" into filtered_reads_log_files_ch
+
+  """
+  for reads_one_file in `ls split_\${sample}_*_R1.fq.gz`; do
+    reads_two_file=`echo \${reads_one_file} | sed s/R1/R2/`
+    base_name=`echo \${reads_one_file} \
+      | sed s/_R1.fq.gz//`
+    # TODO: Need to get the reference file to the worker
+    hts_SeqScreener \
+      -L \${base_name}_htsStats.log \
+      -1 ${split_reads_one_file} \
+      -2 ${split_reads_two_file} \
+      -s ${params.COVIRT_home}/RNAseq/Reference_Files/Hsapiens_rRNA_RefSeq_seq_w_mitrRNA_ITS_ETS.fasta \
+      -x 0.20 \
+      -f \${base_name}
+
+  done
+  """
+}
 
 params.aligned_reads_dir = params.raw_reads_dir + "/aligned_reads"
 
 process alignReadsToReferenceGenome {
 
-  label "align"
+  label "COVIRT_fastq_to_alignment"
 
   publishDir params.aligned_reads_dir, mode: "copy"
 
   input:
-    env sample from split_reads_sample_ch
+    env sample from filtered_reads_sample_ch
+    file split_reads_json_file from split_reads_json_files_ch
 
   output:
     file "*ReadsPerGene.out.tab" into reads_counts_files_ch
@@ -176,13 +207,13 @@ process alignReadsToReferenceGenome {
 
   """
   # Copy in reads files (can't use links anyway)
-  cp ${params.split_reads_dir}/split_\${sample}_*.fq.gz .
+  cp ${params.filtered_reads_dir}/split_\${sample}_*.fastq.gz .
 
   # Handle multiple flowcells per sample
   outSAMattrRGline=""
   readOneFilesIn=""
   readTwoFilesIn=""
-  for flowcell in `ls -1 split_\${sample}_*_R1.fq.gz \
+  for flowcell in `ls -1 split_\${sample}_*_R1.fastq.gz \
     | xargs -L 1 basename \
     | sed s/split_// \
     | sed s/\${sample}// \
@@ -190,7 +221,7 @@ process alignReadsToReferenceGenome {
     | uniq`; do
 
     # Handle multiple lanes per flowcell
-    for lane in `ls -1 split_\${sample}_\${flowcell}_*_R1.fq.gz \
+    for lane in `ls -1 split_\${sample}_\${flowcell}_*_R1.fastq.gz \
       | xargs -L 1 basename \
       | sed s/split_// \
       | sed s/\${sample}// \
@@ -201,11 +232,11 @@ process alignReadsToReferenceGenome {
       if [ -n "\${readOneFilesIn}" ]; then
         readOneFilesIn="\${readOneFilesIn},"
       fi
-      readOneFilesIn="\${readOneFilesIn}split_\${sample}_\${flowcell}_\${lane}_R1.fq.gz"
+      readOneFilesIn="\${readOneFilesIn}split_\${sample}_\${flowcell}_\${lane}_R1.fastq.gz"
       if [ -n "\${readTwoFilesIn}" ]; then
         readTwoFilesIn="\${readTwoFilesIn},"
       fi
-      readTwoFilesIn="\${readTwoFilesIn}split_\${sample}_\${flowcell}_\${lane}_R2.fq.gz"
+      readTwoFilesIn="\${readTwoFilesIn}split_\${sample}_\${flowcell}_\${lane}_R2.fastq.gz"
 
       # Find the multiplex barcode
       barcode=`grep "multiplex_barcode" split_\${sample}_\${flowcell}_\${lane}_R1.report.json \
@@ -216,7 +247,7 @@ process alignReadsToReferenceGenome {
 
       # Construct the read group line
       if [ -n "\${outSAMattrRGline}" ]; then
-        outSAMattrRGline="\${outSAMattrRGline} ,"
+        outSAMattrRGline="\${outSAMattrRGline} , "
       fi
       outSAMattrRGline="\${outSAMattrRGline}ID:\${flowcell}.\${lane} PL:ILLUMINA PU:\${flowcell}.\${lane}.\${barcode} LB:\${sample} SM:\${sample}"
     done
@@ -307,7 +338,7 @@ params.NumberOfThreads = 16
 
 process sortAndIndexAlignedReads {
 
-  label "align"
+  label "COVIRT_fastq_to_alignment"
 
   publishDir params.aligned_reads_dir, mode: "copy"
 
